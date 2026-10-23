@@ -1,0 +1,143 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helper functions ----------
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+
+    // Staff = a document exists at admins/{uid}. Only the Firebase Console
+    // (or Admin SDK) can create it, because clients cannot write to "admins".
+    function isStaff() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function validService(id) {
+      return id in ['admission-enquiry', 'admission-registration', 'document-verification',
+                    'fee-payment', 'scholarship', 'certificate', 'examination', 'other'];
+    }
+    function validStatus(s) {
+      return s in ['Waiting', 'Called', 'In Progress', 'Completed', 'Skipped', 'Cancelled'];
+    }
+
+    // ---------- admins: a user can only check their own entry; nobody can write ----------
+    match /admins/{uid} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+    }
+
+    // ---------- users: profile ----------
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isStaff();
+
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['name', 'email', 'phone', 'category', 'createdAt'])
+        && request.resource.data.keys().hasAll(['name', 'email', 'phone', 'category', 'createdAt'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 3 && request.resource.data.name.size() <= 80
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.phone is string
+        && request.resource.data.phone.matches('^\\+91[6-9][0-9]{9}$')
+        && request.resource.data.category in ['Government Quota', 'Management Quota']
+        && request.resource.data.createdAt == request.time;
+
+      // Users may change only these fields (no role field exists to abuse).
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'phone', 'category'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 3 && request.resource.data.name.size() <= 80
+        && request.resource.data.phone.matches('^\\+91[6-9][0-9]{9}$')
+        && request.resource.data.category in ['Government Quota', 'Management Quota'];
+
+      allow delete: if false;
+    }
+
+    // ---------- queues: one counter document per service per day ----------
+    match /queues/{queueId} {
+      allow read: if signedIn();
+
+      // First token of the day creates the queue with lastNumber = 1 ...
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['serviceId', 'queueDate', 'lastNumber', 'createdAt', 'updatedAt'])
+        && validService(request.resource.data.serviceId)
+        && queueId == request.resource.data.serviceId + '_' + request.resource.data.queueDate
+        && request.resource.data.queueDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.lastNumber == 1
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/tokens/$(queueId + '_1'));
+
+      // ... later tokens may only add exactly +1, and only together with that token.
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastNumber', 'updatedAt'])
+        && request.resource.data.lastNumber == resource.data.lastNumber + 1
+        && request.resource.data.updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/tokens/$(queueId + '_' + string(request.resource.data.lastNumber)));
+
+      allow delete: if false;
+    }
+
+    // ---------- tokens: public queue entries (no personal details inside) ----------
+    match /tokens/{tokenId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['uid', 'serviceId', 'serviceTitle', 'queueId', 'queueDate',
+             'sequence', 'number', 'status', 'counterId', 'counterName', 'createdAt', 'updatedAt'])
+        && request.resource.data.uid == request.auth.uid
+        && validService(request.resource.data.serviceId)
+        && request.resource.data.status == 'Waiting'
+        && request.resource.data.counterId == null
+        && request.resource.data.counterName == null
+        && request.resource.data.sequence is int
+        && request.resource.data.queueId == request.resource.data.serviceId + '_' + request.resource.data.queueDate
+        && tokenId == request.resource.data.queueId + '_' + string(request.resource.data.sequence)
+        && request.resource.data.sequence == getAfter(/databases/$(database)/documents/queues/$(request.resource.data.queueId)).data.lastNumber
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow update:
+        // staff: status workflow fields only
+        if (isStaff()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+                 ['status', 'counterId', 'counterName', 'calledAt', 'startedAt', 'completedAt', 'skippedAt', 'updatedAt'])
+            && validStatus(request.resource.data.status))
+        // owner: may cancel own token while it is still Waiting
+        || (isOwner(resource.data.uid)
+            && resource.data.status == 'Waiting'
+            && request.resource.data.status == 'Cancelled'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt']));
+
+      allow delete: if false;
+    }
+
+    // ---------- serviceRequests: private form data ----------
+    match /serviceRequests/{requestId} {
+      allow read: if isOwner(resource.data.uid) || isStaff();
+
+      // No payment/verification fields are allowed, so users cannot fake them.
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['uid', 'serviceId', 'serviceTitle', 'details', 'tokenId',
+             'tokenNumber', 'queueId', 'status', 'createdAt'])
+        && request.resource.data.keys().hasAll(['uid', 'serviceId', 'serviceTitle', 'details', 'tokenId',
+             'tokenNumber', 'queueId', 'status', 'createdAt'])
+        && request.resource.data.uid == request.auth.uid
+        && validService(request.resource.data.serviceId)
+        && request.resource.data.status == 'Submitted'
+        && request.resource.data.details is map
+        && request.resource.data.details.size() <= 10
+        && request.resource.data.createdAt == request.time
+        && getAfter(/databases/$(database)/documents/tokens/$(request.resource.data.tokenId)).data.uid == request.auth.uid;
+
+      allow update, delete: if false;
+    }
+
+    // ---------- counters: staff only ----------
+    match /counters/{counterId} {
+      allow read, write: if isStaff();
+    }
+
+    // Everything else is denied by default.
+  }
+}

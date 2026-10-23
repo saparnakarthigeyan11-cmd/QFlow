@@ -1,0 +1,38 @@
+/* Global base styles for QFlow.
+   The old Vite template styles were removed because they caused conflicts:
+   - they switched heading colours to near-white when the computer used Dark Mode
+   - they forced #root to 1126px wide and centered all text */
+
+:root {
+  --navy: #172033;
+  --blue: #3157b7;
+  --blue-dark: #27499c;
+  --light-blue: #eef3ff;
+  --muted: #64748b;
+  --border: #e0e6ef;
+  --bg: #f4f7fb;
+
+  color-scheme: light; /* QFlow is a light-theme portal */
+  font-family: Arial, Helvetica, sans-serif;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--navy);
+}
+
+h1, h2, h3, h4 {
+  color: var(--navy);
+}
+
+button, input, select {
+  font-family: inherit;
+}
